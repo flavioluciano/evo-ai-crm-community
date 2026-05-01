@@ -2,11 +2,25 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
   queue_as :low
 
   def perform(params = {})
-    Rails.logger.info "WhatsApp webhook processing started: #{params.inspect}"
+    # ActiveJob deserializa argumentos como Hash com chaves *string*. O código usa símbolos
+    # (:instanceId, :event, etc.) — sem normalizar, o canal Evolution Go nunca é encontrado e
+    # as mensagens somem sem erro visível.
+    params = normalize_whatsapp_webhook_params(params)
+
+    Rails.logger.info "WhatsApp webhook processing started: #{params.slice(:event, :instanceId, :instance, :phone_number).inspect}"
 
     channel = find_channel(params)
+    if channel.blank?
+      Rails.logger.error(
+        'WhatsApp webhook: no channel matched — event discarded. ' \
+        "instanceId=#{params[:instanceId].inspect} instance=#{params[:instance].inspect} " \
+        "phone_number=#{params[:phone_number].inspect}"
+      )
+      return
+    end
+
     if channel_is_inactive?(channel)
-      Rails.logger.warn("Inactive WhatsApp channel: #{channel&.phone_number || "unknown - #{params[:phone_number]}"}")
+      Rails.logger.warn("Inactive WhatsApp channel: #{channel.phone_number} (reauthorization_required=#{channel.reauthorization_required?})")
       return
     end
 
@@ -22,14 +36,33 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
 
   private
 
+  def normalize_evolution_webhook_event_name(raw)
+    raw.to_s.downcase.tr('-', '.').tr('_', '.')
+  end
+
+  def normalize_whatsapp_webhook_params(raw)
+    h = raw.respond_to?(:to_unsafe_h) ? raw.to_unsafe_h : raw
+    h = {} if h.nil?
+    h = h.deep_symbolize_keys
+
+    # Evolution API (Node): payloads sometimes use PascalCase/camelCase at the root after JSON parse.
+    h[:event] ||= h[:Event]
+    h[:instance] ||= h[:Instance] || h[:instanceName]
+    h[:server_url] ||= h[:serverUrl] || h[:ServerUrl]
+    h[:data] ||= h[:Data]
+
+    h
+  end
+
   def sync_event?(params)
     # WhatsApp Cloud sync events
     whatsapp_cloud_field = params.dig(:entry, 0, :changes, 0, :field)
     whatsapp_cloud_sync_fields = %w[smb_app_state_sync smb_message_echoes history account_update user_id_update]
 
-    # Evolution API sync events
-    evolution_event = params[:event]
-    evolution_sync_events = %w[contacts.upsert messages.set]
+    # Evolution API sync events — payloads use CONTACTS_UPSERT (underscores).
+    # messages.set / MESSAGES_SET (bulk history) is intentionally NOT sync: only messages.upsert imports messages.
+    evolution_event = normalize_evolution_webhook_event_name(params[:event])
+    evolution_sync_events = %w[contacts.upsert]
 
     is_whatsapp_cloud_sync = whatsapp_cloud_sync_fields.include?(whatsapp_cloud_field)
     is_evolution_sync = evolution_sync_events.include?(evolution_event)
@@ -129,172 +162,34 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
   end
 
   def handle_evolution_sync_events(channel, params)
-    event = params[:event]
-    Rails.logger.info "Processing Evolution sync event: #{event} for channel #{channel.phone_number}"
+    event = normalize_evolution_webhook_event_name(params[:event])
+    Rails.logger.info "Processing Evolution sync event: #{params[:event]} (normalized: #{event}) for channel #{channel.phone_number}"
 
     case event
     when 'contacts.upsert'
       handle_evolution_contacts_sync(channel, params)
-    when 'messages.set'
-      handle_evolution_messages_sync(channel, params)
     else
-      Rails.logger.warn "Unknown Evolution sync event: #{event}"
+      Rails.logger.warn "Unknown Evolution sync event: #{params[:event]} (normalized: #{event})"
     end
   end
 
   def handle_evolution_contacts_sync(channel, params)
     contacts_data = params[:data]
-    return unless contacts_data.is_a?(Array)
+    list =
+      if contacts_data.is_a?(Array)
+        contacts_data
+      elsif contacts_data.is_a?(Hash)
+        [contacts_data]
+      else
+        []
+      end
 
-    Rails.logger.info "[EVOLUTION] Processing #{contacts_data.size} contacts from sync webhook"
+    return if list.empty?
 
-    contacts_data.each do |contact_data|
-      process_evolution_contact(channel, contact_data)
-    end
-  end
+    Rails.logger.info "[EVOLUTION] Processing #{list.size} contacts from sync webhook"
 
-  def process_evolution_contact(channel, contact_data)
-    remote_jid = contact_data['remoteJid']
-    return unless remote_jid&.include?('@s.whatsapp.net') # Only individual contacts
-
-    phone_number = remote_jid.split('@').first
-    formatted_phone = phone_number.start_with?('+') ? phone_number : "+#{phone_number}"
-    push_name = contact_data['pushName']
-
-    # Create or update contact in Evolution
-    ::ContactInboxWithContactBuilder.new(
-      source_id: phone_number,
-      inbox: channel.inbox,
-      contact_attributes: {
-        name: push_name || formatted_phone,
-        phone_number: formatted_phone,
-        additional_attributes: {
-          evolution_contact_synced: true,
-          evolution_sync_timestamp: Time.current.to_i,
-          evolution_profile_pic_url: contact_data['profilePicUrl'],
-          evolution_instance_id: contact_data['instanceId']
-        }
-      }
-    ).perform
-
-    Rails.logger.info "[EVOLUTION] Contact synced via webhook: #{push_name} (#{formatted_phone})"
-  rescue StandardError => e
-    Rails.logger.error "[EVOLUTION] Contact sync failed for #{remote_jid}: #{e.message}"
-  end
-
-  def handle_evolution_messages_sync(channel, params)
-    messages_data = params[:data]
-    return unless messages_data.is_a?(Array)
-
-    Rails.logger.info "[EVOLUTION] Processing #{messages_data.size} messages from sync webhook"
-
-    # Group messages by conversation (remoteJid)
-    messages_by_chat = messages_data.group_by { |msg| msg.dig('key', 'remoteJid') }
-
-    messages_by_chat.each do |remote_jid, chat_messages|
-      process_evolution_conversation_sync(channel, remote_jid, chat_messages)
-    end
-  end
-
-  def process_evolution_conversation_sync(channel, remote_jid, messages)
-    return unless remote_jid&.include?('@s.whatsapp.net') # Only individual chats for now
-
-    phone_number = remote_jid.split('@').first
-
-    # Find or create contact
-    contact_inbox = ::ContactInboxWithContactBuilder.new(
-      source_id: phone_number,
-      inbox: channel.inbox,
-      contact_attributes: {
-        name: phone_number,
-        phone_number: "+#{phone_number}"
-      }
-    ).perform
-
-    # Find or create conversation
-    conversation = contact_inbox.conversations.find_or_create_by!(
-      inbox_id: channel.inbox.id,
-      contact_id: contact_inbox.contact_id,
-      contact_inbox_id: contact_inbox.id
-    )
-
-    # Process messages for this conversation
-    messages.each do |message_data|
-      process_evolution_sync_message(channel, conversation, message_data)
-    end
-
-    Rails.logger.info "[EVOLUTION] Conversation sync processed: #{conversation.id} with #{messages.size} messages"
-  rescue StandardError => e
-    Rails.logger.error "[EVOLUTION] Conversation sync failed for #{remote_jid}: #{e.message}"
-  end
-
-  def process_evolution_sync_message(channel, conversation, message_data)
-    message_id = message_data.dig('key', 'id')
-    return if conversation.messages.find_by(source_id: message_id) # Skip if already exists
-
-    # Determine message direction
-    from_me = message_data.dig('key', 'fromMe') == true
-
-    # Extract message content
-    content = extract_evolution_sync_message_content(message_data)
-    return if content.blank?
-
-    # Convert messageTimestamp to proper datetime
-    message_timestamp = message_data['messageTimestamp']
-    created_at = message_timestamp.present? ? Time.zone.at(message_timestamp) : Time.current
-
-    # Create message in Evolution with original timestamp
-    message = conversation.messages.create!(
-      content: content,
-      inbox_id: channel.inbox.id,
-      source_id: message_id,
-      sender: from_me ? User.where(type: 'SuperAdmin').first || User.first : conversation.contact,
-      sender_type: from_me ? 'User' : 'Contact',
-      message_type: from_me ? :outgoing : :incoming,
-      created_at: created_at,  # 🎯 Data real da mensagem!
-      updated_at: created_at,  # Manter consistência
-      content_attributes: {
-        external_created_at: message_timestamp,
-        evolution_synced: true,
-        evolution_message_type: message_data['messageType'],
-        evolution_status: message_data['status']
-      }
-    )
-
-    Rails.logger.info "[EVOLUTION] Sync message created: #{message.id} - #{content.truncate(50)}"
-  rescue StandardError => e
-    Rails.logger.error "[EVOLUTION] Sync message failed for #{message_id}: #{e.message}"
-  end
-
-  def extract_evolution_sync_message_content(message_data)
-    message = message_data['message']
-    return unless message
-
-    # Extract text content based on message type
-    content = message['conversation'] ||
-              message.dig('extendedTextMessage', 'text') ||
-              message.dig('imageMessage', 'caption') ||
-              message.dig('videoMessage', 'caption') ||
-              message.dig('documentMessage', 'caption')
-
-    # Fallback for media messages without caption
-    content || determine_media_content(message_data['messageType'])
-  end
-
-  def determine_media_content(message_type)
-    case message_type
-    when 'imageMessage'
-      'Image message'
-    when 'audioMessage'
-      'Audio message'
-    when 'videoMessage'
-      'Video message'
-    when 'documentMessage'
-      'Document message'
-    when 'stickerMessage'
-      'Sticker message'
-    else
-      'Media message'
+    list.each do |contact_data|
+      Whatsapp::EvolutionContactUpsertService.new(channel: channel, contact_payload: contact_data).perform
     end
   end
 
@@ -358,18 +253,24 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
       end
     end
 
-    # For Evolution Go, prioritize finding by instanceId
-    if params[:instanceId].present?
-      channel = find_channel_by_evolution_go_instance(params[:instanceId])
+    # For Evolution Go, match instanceId / instanceToken against any persisted provider_config keys
+    if params[:instanceId].present? || params[:instanceToken].present?
+      channel = find_channel_by_evolution_go_instance(
+        params[:instanceId],
+        instance_token: params[:instanceToken]
+      )
       if channel
-        Rails.logger.info "Channel search via Evolution Go instanceId #{params[:instanceId]}: found #{channel.phone_number}"
+        Rails.logger.info "Channel search via Evolution Go instanceId=#{params[:instanceId].inspect}: found #{channel.phone_number}"
         return channel
       end
     end
 
-    # For Evolution API, prioritize finding by instance name + server_url
+    # For Evolution API (Node): instance name + optional server_url (normalized match)
     if params[:instance].present? && params[:event].present?
-      channel = find_channel_by_evolution_instance(params[:instance], params[:server_url])
+      channel = Whatsapp::EvolutionChannelFinder.find_channel(
+        params[:instance],
+        server_url: params[:server_url]
+      )
       if channel
         Rails.logger.info "Channel search via Evolution instance #{params[:instance]}: found #{channel.phone_number}"
         return channel
@@ -403,29 +304,6 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
     channels.first
   end
 
-  def find_channel_by_evolution_instance(instance_name, server_url = nil)
-    # Try to find by both instance_name and server_url for better precision
-    if server_url.present?
-      channel = Channel::Whatsapp.joins(:inbox)
-                                 .where(provider: 'evolution')
-                                 .where("provider_config ->> 'instance_name' = ?", instance_name)
-                                 .where("provider_config ->> 'api_url' = ?", server_url)
-                                 .first
-
-      Rails.logger.info "Evolution channel search: instance=#{instance_name}, server_url=#{server_url} - #{channel ? 'found' : 'not found'}"
-      return channel if channel
-    end
-
-    # Fallback to instance_name only if server_url matching fails
-    channel = Channel::Whatsapp.joins(:inbox)
-                               .where(provider: 'evolution')
-                               .where("provider_config ->> 'instance_name' = ?", instance_name)
-                               .first
-
-    Rails.logger.info "Evolution channel search (fallback): instance=#{instance_name} only - #{channel ? 'found' : 'not found'}"
-    channel
-  end
-
   def find_channel_by_zapi_instance(instance_id)
     Rails.logger.info "Z-API channel search: Searching for instance_id=#{instance_id}"
 
@@ -438,26 +316,15 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
     channel
   end
 
-  def find_channel_by_evolution_go_instance(instance_uuid)
-    Rails.logger.info "Evolution Go channel search: Searching for instance_uuid=#{instance_uuid}"
+  def find_channel_by_evolution_go_instance(instance_id, instance_token: nil)
+    Rails.logger.info(
+      'Evolution Go channel search: ' \
+      "instance_id=#{instance_id.inspect} instance_token=#{instance_token.present? ? '[present]' : '[absent]'}"
+    )
 
-    # List all Evolution Go channels for debugging
-    all_evolution_go_channels = Channel::Whatsapp.joins(:inbox)
-                                                 .where(provider: 'evolution_go')
+    channel = Whatsapp::EvolutionGoChannelFinder.find_channel(instance_id, instance_token: instance_token)
 
-    Rails.logger.info "Evolution Go channel search: Found #{all_evolution_go_channels.count} evolution_go channels total"
-
-    all_evolution_go_channels.each do |channel|
-      config_instance_uuid = channel.provider_config['instance_uuid']
-      Rails.logger.info "Evolution Go channel search: Channel #{channel.id} has instance_uuid: #{config_instance_uuid}"
-    end
-
-    channel = Channel::Whatsapp.joins(:inbox)
-                               .where(provider: 'evolution_go')
-                               .where("provider_config ->> 'instance_uuid' = ?", instance_uuid)
-                               .first
-
-    Rails.logger.info "Evolution Go channel search: instance_uuid=#{instance_uuid} - #{channel ? "found channel #{channel.id}" : 'not found'}"
+    Rails.logger.info "Evolution Go channel search: #{channel ? "found channel #{channel.id} (#{channel.phone_number})" : 'not found'}"
     channel
   end
 
@@ -482,7 +349,10 @@ class Webhooks::WhatsappEventsJob < ApplicationJob
   end
 
   def channel_is_inactive?(channel)
-    return true if channel.blank?
+    # Evolution / Evolution Go reconnect via QR; a stale Redis reauthorization flag drops webhooks
+    # while the instance is actually connected, so inbound messages never reach the inbox.
+    return false if channel.provider.in?(%w[evolution evolution_go])
+
     return true if channel.reauthorization_required?
 
     false

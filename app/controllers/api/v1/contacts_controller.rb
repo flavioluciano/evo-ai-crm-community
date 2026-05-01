@@ -23,6 +23,7 @@ class Api::V1::ContactsController < Api::V1::BaseController
                         destroy_custom_attributes: 'contacts.update',
                         avatar: 'contacts.update',
                         import: 'contacts.import',
+                        sync_whatsapp: 'contacts.import',
                         export: 'contacts.export',
                         companies: 'contacts.read',
                         companies_list: 'contacts.read',
@@ -87,6 +88,26 @@ class Api::V1::ContactsController < Api::V1::BaseController
     end
 
     success_response(data: {}, message: 'Import started successfully', status: :ok)
+  end
+
+  # Enqueues Evolution API (Node) contact pull for one inbox or all Evolution WhatsApp inboxes.
+  def sync_whatsapp
+    inbox_ids = evolution_whatsapp_inbox_ids_for_sync
+    if inbox_ids.empty?
+      return success_response(
+        data: { queued: 0, inbox_ids: [] },
+        message: 'No Evolution WhatsApp inbox found to sync.',
+        status: :ok
+      )
+    end
+
+    inbox_ids.each { |id| EvolutionContactsSyncJob.perform_later(id, true) }
+
+    success_response(
+      data: { queued: inbox_ids.size, inbox_ids: inbox_ids },
+      message: 'WhatsApp (Evolution) contact sync started. Contacts will appear shortly.',
+      status: :accepted
+    )
   end
 
   def export
@@ -345,6 +366,23 @@ class Api::V1::ContactsController < Api::V1::BaseController
 
     @listable_contacts = @listable_contacts.tagged_with(params[:labels], any: true) if params[:labels].present?
     @listable_contacts
+  end
+
+  def evolution_whatsapp_inbox_ids_for_sync
+    if params[:inbox_id].present?
+      inbox = Inbox.find_by(id: params[:inbox_id])
+      return [] unless inbox
+
+      ch = inbox.channel
+      return [] unless ch.is_a?(Channel::Whatsapp) && ch.provider == 'evolution'
+
+      return [inbox.id]
+    end
+
+    evolution_ids = Channel::Whatsapp.where(provider: 'evolution').pluck(:id)
+    return [] if evolution_ids.empty?
+
+    Inbox.where(channel_type: 'Channel::Whatsapp', channel_id: evolution_ids).pluck(:id)
   end
 
   # TODO: Move this to a finder class

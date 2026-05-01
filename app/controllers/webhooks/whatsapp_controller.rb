@@ -34,12 +34,21 @@ class Webhooks::WhatsappController < ActionController::API
 
   private
 
+  EVOLUTION_GO_EVENTS_WITHOUT_BODY_DATA = %w[
+    Connected
+    ChatPresence
+    Presence
+    Disconnected
+    OfflineSyncCompleted
+  ].freeze
+
   def valid_evolution_go_payload?
-    # Evolution Go webhook must have: event, data, instanceId, instanceToken
-    params[:event].present? &&
-      params[:data].present? &&
-      params[:instanceId].present? &&
-      params[:instanceToken].present?
+    # Evolution Go: root always includes instanceId + instanceToken; some events omit `data`.
+    return false unless params[:event].present? && params[:instanceId].present? && params[:instanceToken].present?
+
+    return true if params[:event].to_s.in?(EVOLUTION_GO_EVENTS_WITHOUT_BODY_DATA)
+
+    params[:data].present?
   end
 
   def perform_whatsapp_events_job

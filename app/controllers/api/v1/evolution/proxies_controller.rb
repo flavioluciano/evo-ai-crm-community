@@ -1,4 +1,6 @@
 class Api::V1::Evolution::ProxiesController < Api::V1::BaseController
+  include EvolutionWhatsappCredentials
+
   def show
     Rails.logger.info "Evolution API get proxy called for instance: #{params[:id]}"
 
@@ -7,8 +9,8 @@ class Api::V1::Evolution::ProxiesController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = get_proxy(api_url, api_hash, instance_name)
 

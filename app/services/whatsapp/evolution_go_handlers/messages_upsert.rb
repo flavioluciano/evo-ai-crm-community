@@ -183,21 +183,20 @@ module Whatsapp::EvolutionGoHandlers::MessagesUpsert
   end
 
   def find_or_create_conversation
-    # Try to find existing conversation
-    conversation = @contact_inbox.conversations.last
+    # Align with Whatsapp::IncomingMessageBaseService#set_conversation (avoid UUID .last ordering;
+    # prefer latest activity and exclude resolved when inbox allows multiple threads).
+    conversation = if inbox.lock_to_single_conversation
+                     @contact_inbox.conversations.order(created_at: :desc).first
+                   else
+                     @contact_inbox.conversations.where.not(status: :resolved).order(created_at: :desc).first
+                   end
 
     if conversation.blank?
       Rails.logger.info "Evolution Go API: Creating new conversation for contact #{@contact.id}"
 
-      # Create new conversation if none exists
-      conversation = ::Conversation.create!(
-        inbox_id: inbox.id,
-        contact_id: @contact.id,
-        contact_inbox_id: @contact_inbox.id,
-        additional_attributes: {
-          evolution_go_chat_id: conversation_id
-        }
-      )
+      conversation = ::Conversation.find_or_create_by!(conversation_params) do |c|
+        c.additional_attributes = { evolution_go_chat_id: conversation_id }
+      end
     else
       Rails.logger.info "Evolution Go API: Using existing conversation #{conversation.id}"
     end

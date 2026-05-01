@@ -11,22 +11,29 @@ module Whatsapp::EvolutionHandlers::MessagesUpsert
   private
 
   def process_messages_upsert
-    # Evolution API v2.3.1 sends single message data directly in 'data' field
-    message_data = processed_params[:data]
-    return if message_data.blank?
+    # Evolution API sends one message in `data`, or occasionally an array of messages.
+    raw = processed_params[:data]
+    return if raw.blank?
 
-    @message = nil
-    @contact_inbox = nil
-    @contact = nil
-    @raw_message = message_data
+    payloads = raw.is_a?(Array) ? raw : [raw]
 
-    Rails.logger.info "Evolution API: Processing message #{raw_message_id} (fromMe: #{!incoming?})"
+    payloads.each do |message_data|
+      next if message_data.blank?
 
-    if incoming?
-      handle_message
-    else
-      # Handle outgoing messages with lock to avoid race conditions
-      with_evolution_channel_lock_on_outgoing_message(inbox.channel.id) { handle_message }
+      message_data = message_data.deep_symbolize_keys if message_data.respond_to?(:deep_symbolize_keys)
+
+      @message = nil
+      @contact_inbox = nil
+      @contact = nil
+      @raw_message = message_data
+
+      Rails.logger.info "Evolution API: Processing message #{raw_message_id} (fromMe: #{!incoming?})"
+
+      if incoming?
+        handle_message
+      else
+        with_evolution_channel_lock_on_outgoing_message(inbox.channel.id) { handle_message }
+      end
     end
   end
 

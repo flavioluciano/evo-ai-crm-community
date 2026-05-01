@@ -3,6 +3,14 @@ class Whatsapp::IncomingMessageEvolutionGoService < Whatsapp::IncomingMessageBas
   include Whatsapp::EvolutionGoHandlers::MessagesUpdate
   include Whatsapp::EvolutionGoHandlers::ReceiptHandler
   include Whatsapp::EvolutionGoHandlers::Helpers
+  include Whatsapp::EvolutionGoHandlers::ContactSync
+
+  def processed_params
+    @processed_params ||= begin
+      h = params.respond_to?(:to_unsafe_h) ? params.to_unsafe_h : params
+      (h || {}).deep_symbolize_keys
+    end
+  end
 
   def perform
     Rails.logger.info "Evolution Go API: Service initialized with inbox: #{@inbox.present? ? @inbox.id : 'NIL'}"
@@ -22,6 +30,10 @@ class Whatsapp::IncomingMessageEvolutionGoService < Whatsapp::IncomingMessageBas
       process_pair_success
     when 'LoggedOut'
       process_logged_out
+    when 'Contact'
+      process_contact_event
+    when 'PushName'
+      process_push_name_event
     else
       Rails.logger.warn "Evolution Go API: Unhandled event type: #{event_type}"
     end
@@ -34,10 +46,14 @@ class Whatsapp::IncomingMessageEvolutionGoService < Whatsapp::IncomingMessageBas
     data = processed_params[:data]
     return if data.blank?
 
-    info = data[:Info]
-    message = data[:Message]
+    data = data.deep_symbolize_keys if data.respond_to?(:deep_symbolize_keys)
+    info = data[:Info] || data[:info]
+    message = data[:Message] || data[:message]
 
     return if info.blank? || message.blank?
+
+    info = info.deep_symbolize_keys if info.respond_to?(:deep_symbolize_keys)
+    message = message.deep_symbolize_keys if message.respond_to?(:deep_symbolize_keys)
 
     Rails.logger.info "Evolution Go API: Processing message #{info[:ID]} (fromMe: #{info[:IsFromMe]}, type: #{info[:Type]})"
 
@@ -108,6 +124,7 @@ class Whatsapp::IncomingMessageEvolutionGoService < Whatsapp::IncomingMessageBas
   def process_pair_success
     instance_id = processed_params[:instanceId]
     data = processed_params[:data]
+    data = data.deep_symbolize_keys if data.respond_to?(:deep_symbolize_keys)
     status = data[:status]
     jid = data[:jid] || data[:ID]
 
@@ -154,6 +171,7 @@ class Whatsapp::IncomingMessageEvolutionGoService < Whatsapp::IncomingMessageBas
   def process_logged_out
     instance_id = processed_params[:instanceId]
     data = processed_params[:data]
+    data = data.deep_symbolize_keys if data.respond_to?(:deep_symbolize_keys)
     reason = data[:reason] || data[:Reason]
 
     Rails.logger.info "Evolution Go API: LoggedOut event - instanceId: #{instance_id}, reason: #{reason}"

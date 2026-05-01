@@ -67,11 +67,8 @@ class Api::V1::EvolutionGo::SettingsController < Api::V1::BaseController
       @instance_uuid = settings_params[:instance_uuid] || settings_params[:instanceId]
     end
 
-    # Busca diretamente pelo Channel::Whatsapp para evitar problemas com associação polimórfica
-    whatsapp_channel = Channel::Whatsapp.joins(:inbox)
-                                        .where(provider: 'evolution_go')
-                                        .where('provider_config @> ?', { instance_uuid: @instance_uuid }.to_json)
-                                        .first
+    # Mesmos identificadores que o frontend usa em getIdentifier() (uuid, ids alternativos ou nome).
+    whatsapp_channel = find_evolution_go_channel_by_config_fragment(@instance_uuid)
 
     if whatsapp_channel
       @inbox = whatsapp_channel.inbox

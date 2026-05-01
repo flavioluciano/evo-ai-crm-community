@@ -1,4 +1,6 @@
 class Api::V1::Evolution::ProfileController < Api::V1::BaseController
+  include EvolutionWhatsappCredentials
+
   # POST /api/v1/evolution/profile/:instance_name/fetch
   def fetch
     Rails.logger.info "Evolution API fetch profile called for instance: #{params[:instance_name]}"
@@ -11,8 +13,8 @@ class Api::V1::Evolution::ProfileController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name, provider)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = fetch_profile(api_url, api_hash, instance_name, phone_number)
 
@@ -41,8 +43,8 @@ class Api::V1::Evolution::ProfileController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name, provider)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = update_profile_name(api_url, api_hash, instance_name, name)
 
@@ -71,8 +73,8 @@ class Api::V1::Evolution::ProfileController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name, provider)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = update_profile_status(api_url, api_hash, instance_name, status)
 
@@ -101,8 +103,8 @@ class Api::V1::Evolution::ProfileController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name, provider)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = update_profile_picture(api_url, api_hash, instance_name, picture_url)
 
@@ -133,8 +135,8 @@ class Api::V1::Evolution::ProfileController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name, provider)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = remove_profile_picture(api_url, api_hash, instance_name)
 

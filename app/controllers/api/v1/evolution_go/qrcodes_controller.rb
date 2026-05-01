@@ -70,19 +70,7 @@ class Api::V1::EvolutionGo::QrcodesController < Api::V1::BaseController
 
     Rails.logger.info "Evolution Go API: Looking for instance with identifier: #{identifier}"
 
-    # Try to find by instance_name first (most common case)
-    whatsapp_channel = Channel::Whatsapp.joins(:inbox)
-                                        .where(provider: 'evolution_go')
-                                        .where('provider_config @> ?', { instance_name: identifier }.to_json)
-                                        .first
-
-    # If not found by name, try by UUID
-    if whatsapp_channel.nil?
-      whatsapp_channel = Channel::Whatsapp.joins(:inbox)
-                                          .where(provider: 'evolution_go')
-                                          .where('provider_config @> ?', { instance_uuid: identifier }.to_json)
-                                          .first
-    end
+    whatsapp_channel = find_evolution_go_channel_by_config_fragment(identifier)
 
     return unless whatsapp_channel
 

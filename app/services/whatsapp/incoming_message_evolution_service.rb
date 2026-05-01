@@ -5,7 +5,7 @@ class Whatsapp::IncomingMessageEvolutionService < Whatsapp::IncomingMessageBaseS
 
   def perform
     # Evolution API v2.3.1 structure: { event: 'messages.upsert', data: {...}, instance: '...' }
-    event_type = processed_params[:event]
+    event_type = processed_params[:event].to_s.downcase.tr('-', '.').tr('_', '.')
 
     Rails.logger.info "Evolution API: Processing event #{event_type} for instance #{processed_params[:instance]}"
     Rails.logger.debug { "Evolution API: Full payload: #{processed_params.inspect}" }
@@ -13,6 +13,9 @@ class Whatsapp::IncomingMessageEvolutionService < Whatsapp::IncomingMessageBaseS
     case event_type
     when 'messages.upsert'
       process_messages_upsert
+    when 'messages.set'
+      # Pacote histórico da Evolution — não importamos; só mensagens novas via messages.upsert entram no CRM.
+      Rails.logger.info 'Evolution API: messages.set ignored (bulk history); only messages.upsert creates CRM messages'
     when 'messages.update'
       process_messages_update
     when 'contacts.update'
@@ -32,8 +35,70 @@ class Whatsapp::IncomingMessageEvolutionService < Whatsapp::IncomingMessageBaseS
 
   private
 
+  def message_under_process?
+    mid = evolution_redis_message_id
+    return false unless mid
+
+    key = format(Redis::RedisKeys::MESSAGE_SOURCE_KEY, id: mid)
+    Redis::Alfred.get(key)
+  end
+
+  def cache_message_source_id_in_redis
+    mid = evolution_redis_message_id
+    return unless mid
+
+    key = format(Redis::RedisKeys::MESSAGE_SOURCE_KEY, id: mid)
+    ::Redis::Alfred.setex(key, true)
+  end
+
+  def clear_message_source_id_from_redis
+    mid = evolution_redis_message_id
+    return unless mid
+
+    key = format(Redis::RedisKeys::MESSAGE_SOURCE_KEY, id: mid)
+    ::Redis::Alfred.delete(key)
+  end
+
   def processed_params
-    @processed_params ||= params
+    @processed_params ||= normalize_evolution_service_params(params)
+  end
+
+  def normalize_evolution_service_params(raw)
+    h = raw.respond_to?(:to_unsafe_h) ? raw.to_unsafe_h : raw
+    h = {} if h.nil?
+    h = h.deep_symbolize_keys
+    h[:event] ||= h[:Event]
+    h[:instance] ||= h[:Instance] || h[:instanceName]
+    h[:server_url] ||= h[:serverUrl] || h[:ServerUrl]
+    h[:data] ||= h[:Data]
+    h
+  end
+
+  # Align Redis dedup with MessagesUpsert: helpers used `data.dig(:key, :id)` which breaks when
+  # `data` is an array or when the real blob is only on `@raw_message`.
+  def evolution_redis_message_id
+    blob = evolution_redis_message_blob
+    return unless blob.is_a?(Hash)
+
+    blob[:messageId] || blob[:keyId] || blob.dig(:key, :id)
+  end
+
+  def evolution_redis_message_blob
+    if instance_variable_defined?(:@raw_message) && @raw_message.is_a?(Hash)
+      @raw_message
+    else
+      d = processed_params[:data]
+      return nil if d.blank?
+
+      if d.is_a?(Array)
+        return nil if d.size != 1
+
+        item = d.first
+        item.respond_to?(:deep_symbolize_keys) ? item.deep_symbolize_keys : item
+      else
+        d
+      end
+    end
   end
 
   def process_contacts_update
@@ -105,6 +170,9 @@ class Whatsapp::IncomingMessageEvolutionService < Whatsapp::IncomingMessageBaseS
       Rails.logger.info "Evolution API: Clearing reauthorization flag for channel #{channel.id}"
       channel.reauthorized!
     end
+
+    EvolutionContactsSyncJob.perform_later(inbox.id)
+    EvolutionConversationsSyncJob.perform_later(inbox.id)
 
     # Update inbox avatar if profile picture URL is present
     return unless profile_picture_url.present?

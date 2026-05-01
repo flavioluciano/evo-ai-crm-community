@@ -117,9 +117,12 @@ module Whatsapp::EvolutionGoHandlers::Helpers
     Rails.logger.info "Evolution Go API: Is incoming: #{incoming?}"
 
     return false if raw_message_id.blank?
-    return false unless message_content.present? || @evolution_go_message.present?
+    # Media / stickers often have no text; empty Hash is `.blank?` in Rails and would skip incorrectly.
+    return true if media_message?
+    return true if message_content.present?
+    return true if @evolution_go_message.is_a?(Hash) && @evolution_go_message.any?
 
-    true
+    false
   end
 
   def quoted_message_id

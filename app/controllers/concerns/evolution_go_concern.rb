@@ -1,7 +1,22 @@
 module EvolutionGoConcern
   extend ActiveSupport::Concern
 
+  EVOLUTION_GO_UUID_RE = /\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i.freeze
+
   private
+
+  def evolution_go_resolve_instance_uuid(request_identifier, channel_canonical_uuid)
+    rid = request_identifier.to_s.presence
+    canon = channel_canonical_uuid.to_s.presence
+    return canon || rid if rid.blank?
+    return rid if rid.match?(EVOLUTION_GO_UUID_RE)
+
+    canon.presence || rid
+  end
+
+  def find_evolution_go_channel_by_config_fragment(identifier)
+    Whatsapp::EvolutionGoChannelFinder.find_channel(identifier)
+  end
 
   # Preenche api_url/admin_token a partir da InstallationConfig quando o canal usa "config global"
   # (frontend não grava api_url/admin_token no provider_config).
@@ -10,11 +25,15 @@ module EvolutionGoConcern
   def hydrate_evolution_go_credentials_from_channel!(whatsapp_channel, only_fill_blanks: false)
     cfg = (whatsapp_channel.provider_config || {}).with_indifferent_access
 
+    # Evolution Go paths (/advanced-settings, /info/:id, delete) require the instance *Id* (UUID),
+    # never the friendly name — using instance_name here breaks uuid.Parse on the Go side → 500 → CRM 422.
+    evolution_instance_id = cfg[:instance_uuid].presence || cfg[:instance_id].presence || cfg[:instanceId].presence
+
     merged = {
       api_url: cfg[:api_url].presence || GlobalConfigService.load('EVOLUTION_GO_API_URL', '').to_s.strip,
       admin_token: cfg[:admin_token].presence || GlobalConfigService.load('EVOLUTION_GO_ADMIN_SECRET', '').to_s.strip,
       instance_token: cfg[:instance_token].presence,
-      instance_uuid: cfg[:instance_uuid].presence || cfg[:instance_name].presence,
+      instance_uuid: evolution_instance_id,
       instance_name: cfg[:instance_name].presence
     }
 
@@ -22,14 +41,14 @@ module EvolutionGoConcern
       @api_url = @api_url.presence || merged[:api_url]
       @admin_token = @admin_token.presence || merged[:admin_token]
       @instance_token = @instance_token.presence || merged[:instance_token]
-      @instance_uuid = @instance_uuid.presence || merged[:instance_uuid]
+      @instance_uuid = evolution_go_resolve_instance_uuid(@instance_uuid, merged[:instance_uuid])
       @instance_name = @instance_name.presence || merged[:instance_name]
     else
       @api_url = merged[:api_url]
       @admin_token = merged[:admin_token]
       @instance_token = merged[:instance_token]
-      @instance_uuid = merged[:instance_uuid].presence || @instance_uuid
-      @instance_name = merged[:instance_name].presence || @instance_name
+      @instance_uuid = evolution_go_resolve_instance_uuid(@instance_uuid, merged[:instance_uuid])
+      @instance_name = @instance_name.presence || merged[:instance_name]
     end
   end
 

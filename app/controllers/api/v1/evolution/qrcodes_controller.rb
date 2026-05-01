@@ -1,4 +1,6 @@
 class Api::V1::Evolution::QrcodesController < Api::V1::BaseController
+  include EvolutionWhatsappCredentials
+
   def show
     Rails.logger.info "Evolution API get QR code called for instance: #{params[:id]}"
 
@@ -7,8 +9,8 @@ class Api::V1::Evolution::QrcodesController < Api::V1::BaseController
       channel = find_whatsapp_channel_by_instance_name(instance_name)
 
       if channel
-        api_url = channel.provider_config['api_url']
-        api_hash = channel.provider_config['admin_token']
+        api_url = evolution_api_url_for_channel(channel)
+        api_hash = evolution_api_key_for_channel(channel)
 
         result = get_qrcode(api_url, api_hash, instance_name)
 
@@ -68,7 +70,57 @@ class Api::V1::Evolution::QrcodesController < Api::V1::BaseController
     end
   end
 
+  def evolution_http_error_message(response)
+    body = response.body.to_s
+    parsed = JSON.parse(body)
+    raw = parsed['response'] && parsed['response']['message']
+    msg =
+      case raw
+      when Array
+        raw.flatten.map(&:to_s).reject(&:blank?).join('; ')
+      when String
+        raw
+      else
+        parsed['message'].presence
+      end
+    msg ||= body.truncate(400)
+    "Evolution API HTTP #{response.code}: #{msg}"
+  rescue JSON::ParserError
+    "Evolution API HTTP #{response.code}: #{body.truncate(400)}"
+  end
+
+  # Normalizes GET /instance/connect/:name payloads (Evolution v2 returns QR at top level or under qrcode).
+  def normalize_evolution_connect_response(parsed)
+    if parsed['error'] == true
+      msg = parsed['message'].to_s.presence || 'Evolution API returned an error'
+      raise msg
+    end
+
+    if parsed['instance'].is_a?(Hash) && parsed['instance']['state'] == 'open'
+      return {
+        connected: true,
+        state: 'open',
+        instance_name: parsed['instance']['instanceName']
+      }
+    end
+
+    nested = parsed['qrcode'] || parsed['qrCode']
+    base64 = parsed['base64']
+    base64 = nested['base64'] if base64.blank? && nested.is_a?(Hash)
+    pairing = parsed['pairingCode']
+    pairing = nested['pairingCode'] if pairing.blank? && nested.is_a?(Hash)
+
+    {
+      base64: base64,
+      pairingCode: pairing,
+      connected: false
+    }
+  end
+
   def get_qrcode(api_url, api_hash, instance_name)
+    raise ArgumentError, 'Evolution api_url is missing for this channel.' if api_url.blank?
+    raise ArgumentError, 'Evolution API key is missing (set admin_token or api_hash on the channel).' if api_hash.blank?
+
     qrcode_url = "#{api_url.chomp('/')}/instance/connect/#{instance_name}"
     Rails.logger.info "Evolution API: Getting QR code from #{qrcode_url}"
 
@@ -83,36 +135,16 @@ class Api::V1::Evolution::QrcodesController < Api::V1::BaseController
     request['apikey'] = api_hash
     request['Content-Type'] = 'application/json'
 
-    Rails.logger.info "Evolution API: QR code request headers: #{request.to_hash}"
-
     response = http.request(request)
     Rails.logger.info "Evolution API: QR code response code: #{response.code}"
     Rails.logger.info "Evolution API: QR code response body: #{response.body}"
 
-    raise "Failed to get QR code. Status: #{response.code}, Body: #{response.body}" unless response.is_a?(Net::HTTPSuccess)
+    raise evolution_http_error_message(response) unless response.is_a?(Net::HTTPSuccess)
 
     parsed_response = JSON.parse(response.body)
-
-    # Check if instance is already connected
-    if parsed_response['instance'] && parsed_response['instance']['state'] == 'open'
-      return {
-        connected: true,
-        state: 'open',
-        instance_name: parsed_response['instance']['instanceName']
-      }
-    end
-
-    # Format response to match the frontend expectations
-    {
-      base64: parsed_response['base64'],
-      pairingCode: parsed_response['pairingCode'],
-      connected: false
-    }
+    normalize_evolution_connect_response(parsed_response)
   rescue JSON::ParserError => e
     Rails.logger.error "Evolution API: QR code JSON parse error: #{e.message}, Body: #{response&.body}"
     raise 'Invalid response from Evolution API connect endpoint'
-  rescue StandardError => e
-    Rails.logger.error "Evolution API: QR code connection error: #{e.class} - #{e.message}"
-    raise "Failed to get QR code: #{e.message}"
   end
 end

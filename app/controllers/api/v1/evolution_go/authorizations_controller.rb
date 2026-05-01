@@ -195,7 +195,7 @@ class Api::V1::EvolutionGo::AuthorizationsController < Api::V1::BaseController
     Rails.logger.info "Evolution Go API: Deleting instance #{@instance_uuid}"
 
     begin
-      delete_instance_go(@api_url, @instance_token, @instance_uuid)
+      delete_instance_go(@api_url, @admin_token, @instance_uuid)
 
       render json: {
         success: true,
@@ -228,10 +228,7 @@ class Api::V1::EvolutionGo::AuthorizationsController < Api::V1::BaseController
 
     Rails.logger.info "Evolution Go API: Looking for instance with identifier: #{@instance_uuid}"
 
-    # Try to find the channel first by instance UUID
-    whatsapp_channel = Channel::Whatsapp.joins(:inbox)
-                                        .where(provider: 'evolution_go')
-                                        .find { |ch| ch.provider_config['instance_uuid'] == @instance_uuid }
+    whatsapp_channel = find_evolution_go_channel_by_config_fragment(@instance_uuid)
 
     if whatsapp_channel
       Rails.logger.info "Evolution Go API: Found channel with config: #{whatsapp_channel.provider_config.inspect}"
@@ -439,7 +436,8 @@ class Api::V1::EvolutionGo::AuthorizationsController < Api::V1::BaseController
     raise "Failed to logout instance: #{e.message}"
   end
 
-  def delete_instance_go(api_url, instance_token, instance_uuid)
+  # Evolution Go: DELETE /instance/delete/:id uses AuthAdmin (global api key), not instance token.
+  def delete_instance_go(api_url, admin_token, instance_uuid)
     delete_url = "#{api_url.chomp('/')}/instance/delete/#{instance_uuid}"
     Rails.logger.info "Evolution Go API: Deleting instance at #{delete_url}"
 
@@ -451,7 +449,7 @@ class Api::V1::EvolutionGo::AuthorizationsController < Api::V1::BaseController
     http.read_timeout = 15
 
     request = Net::HTTP::Delete.new(uri)
-    request['apikey'] = instance_token # header com apikey da instancia
+    request['apikey'] = admin_token
     request['Content-Type'] = 'application/json'
 
     response = http.request(request)

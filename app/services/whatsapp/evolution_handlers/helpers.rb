@@ -174,7 +174,8 @@ module Whatsapp::EvolutionHandlers::Helpers
     when 'g.us'
       'group'
     when 'lid'
-      'lid'
+      # WhatsApp PN-linked / LID chats: treat as direct chat so messages reach the inbox (groups use @g.us).
+      'user'
     when 'broadcast'
       jid.start_with?('status@') ? 'status' : 'broadcast'
     when 'newsletter'

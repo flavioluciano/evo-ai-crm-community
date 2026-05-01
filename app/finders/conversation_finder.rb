@@ -5,6 +5,9 @@ class ConversationFinder
   attr_reader :current_user, :params
 
   DEFAULT_STATUS = 'open'.freeze
+  # When no status is passed (GET /conversations), show queues that receive new WhatsApp self-hosted traffic
+  # (Evolution Go / bots often keep conversations as pending until a human opens them).
+  DEFAULT_STATUSES_FOR_INDEX = %w[open pending].freeze
   SORT_OPTIONS = {
     'last_activity_at_asc' => %w[sort_on_last_activity_at asc],
     'last_activity_at_desc' => %w[sort_on_last_activity_at desc],
@@ -145,9 +148,21 @@ class ConversationFinder
   end
 
   def apply_status_filter(query)
-    return query if @params[:status] == 'all'
+    raw = @params[:status]
 
-    query.where(status: @params[:status] || DEFAULT_STATUS)
+    if raw.blank?
+      return query.where(status: DEFAULT_STATUSES_FOR_INDEX)
+    end
+
+    joined = raw.is_a?(Array) ? raw.flatten.join(',') : raw.to_s
+    return query if joined.strip.casecmp('all').zero?
+
+    tokens = joined.split(',').map(&:strip).reject(&:blank?)
+    allowed = Conversation.statuses.keys.map(&:to_s)
+    tokens &= allowed
+    tokens = DEFAULT_STATUSES_FOR_INDEX if tokens.empty?
+
+    query.where(status: tokens)
   end
 
   def apply_team_filter(query)

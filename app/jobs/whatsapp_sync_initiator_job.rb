@@ -197,9 +197,8 @@ class WhatsappSyncInitiatorJob < ApplicationJob
       MESSAGES_DELETE
     ]
 
-    # Add sync events if sync is enabled
+    # Add sync events if sync is enabled (no MESSAGES_SET — we only store new traffic via MESSAGES_UPSERT)
     events += %w[
-      MESSAGES_SET
       CONTACTS_UPSERT
       CONTACTS_UPDATE
     ]

@@ -503,7 +503,9 @@ class AgentBotListener < BaseListener
   end
 
   def process_webhook_bot_event(agent_bot, payload)
-    return if agent_bot.outgoing_url.blank?
+    # Evo AI + Bot Runtime uses BOT_RUNTIME_URL; per-bot outgoing_url is often blank.
+    runtime_evo_ai = BotRuntime::Config.enabled? && agent_bot.evo_ai_provider?
+    return if agent_bot.outgoing_url.blank? && !runtime_evo_ai
 
     # Bot Runtime handles debounce, AI calls and dispatch externally
     if BotRuntime::Config.enabled?
