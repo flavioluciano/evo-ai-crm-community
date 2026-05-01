@@ -236,12 +236,9 @@ class Api::V1::EvolutionGo::AuthorizationsController < Api::V1::BaseController
     if whatsapp_channel
       Rails.logger.info "Evolution Go API: Found channel with config: #{whatsapp_channel.provider_config.inspect}"
 
-      # Extract configuration from the channel
+      # Extract configuration from the channel (mantém valores já vindos do pedido / global)
       @inbox = whatsapp_channel.inbox
-      @api_url = whatsapp_channel.provider_config['api_url'] if @api_url.blank?
-      @admin_token = whatsapp_channel.provider_config['admin_token'] if @admin_token.blank?
-      @instance_token = whatsapp_channel.provider_config['instance_token'] if @instance_token.blank?
-      @instance_name = whatsapp_channel.provider_config['instance_name'] if @instance_name.blank?
+      hydrate_evolution_go_credentials_from_channel!(whatsapp_channel, only_fill_blanks: true)
     else
       Rails.logger.warn "Evolution Go API: No channel found for instance_uuid: #{@instance_uuid}"
     end
