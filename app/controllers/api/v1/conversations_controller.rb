@@ -19,33 +19,13 @@ class Api::V1::ConversationsController < Api::V1::BaseController
     archive: 'conversations.update',
     unarchive: 'conversations.update',
     transcript: 'conversations.export',
-    available_for_pipeline: 'conversations.read',
-    sync_whatsapp: 'conversations.update'
+    available_for_pipeline: 'conversations.read'
   })
   
-  before_action :conversation, except: [:index, :meta, :search, :create, :filter, :sync_whatsapp]
+  before_action :conversation, except: [:index, :meta, :search, :create, :filter]
   before_action :inbox, :contact, :contact_inbox, only: [:create]
 
   ATTACHMENT_RESULTS_PER_PAGE = 100
-
-  def sync_whatsapp
-    inbox_ids = evolution_whatsapp_inbox_ids_for_chat_sync
-    if inbox_ids.empty?
-      return success_response(
-        data: { queued: 0, inbox_ids: [] },
-        message: 'No Evolution WhatsApp inbox found to sync conversations.',
-        status: :ok
-      )
-    end
-
-    inbox_ids.each { |id| EvolutionConversationsSyncJob.perform_later(id, true) }
-
-    success_response(
-      data: { queued: inbox_ids.size, inbox_ids: inbox_ids },
-      message: 'WhatsApp (Evolution) conversation sync started. Chats will appear shortly.',
-      status: :accepted
-    )
-  end
 
   def index
     result = conversation_finder.perform
@@ -651,23 +631,6 @@ class Api::V1::ConversationsController < Api::V1::BaseController
       source_id: params[:source_id],
       hmac_verified: hmac_verified?
     ).perform
-  end
-
-  def evolution_whatsapp_inbox_ids_for_chat_sync
-    if params[:inbox_id].present?
-      inbox = Inbox.find_by(id: params[:inbox_id])
-      return [] unless inbox
-
-      ch = inbox.channel
-      return [] unless ch.is_a?(Channel::Whatsapp) && ch.provider == 'evolution'
-
-      return [inbox.id]
-    end
-
-    evolution_ids = Channel::Whatsapp.where(provider: 'evolution').pluck(:id)
-    return [] if evolution_ids.empty?
-
-    Inbox.where(channel_type: 'Channel::Whatsapp', channel_id: evolution_ids).pluck(:id)
   end
 
   def conversation_finder

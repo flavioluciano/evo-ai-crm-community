@@ -105,7 +105,6 @@ Rails.application.routes.draw do
           get :meta
           get :search
           post :filter
-          post :sync_whatsapp
           get :available_for_pipeline
         end
         resources :messages, only: [:index, :create, :destroy, :update], controller: 'conversations/messages' do

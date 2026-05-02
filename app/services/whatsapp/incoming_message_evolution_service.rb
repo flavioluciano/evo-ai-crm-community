@@ -172,7 +172,6 @@ class Whatsapp::IncomingMessageEvolutionService < Whatsapp::IncomingMessageBaseS
     end
 
     EvolutionContactsSyncJob.perform_later(inbox.id)
-    EvolutionConversationsSyncJob.perform_later(inbox.id)
 
     # Update inbox avatar if profile picture URL is present
     return unless profile_picture_url.present?
